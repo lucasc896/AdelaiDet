@@ -1,6 +1,7 @@
 import cv2
 import torch
 import torch.nn.functional as F
+from typing import List
 
 
 def _scale_size(size, scale):
@@ -16,19 +17,21 @@ def _scale_size(size, scale):
 
 
 interp_codes = {
-    'nearest': cv2.INTER_NEAREST,
-    'bilinear': cv2.INTER_LINEAR,
-    'bicubic': cv2.INTER_CUBIC,
-    'area': cv2.INTER_AREA,
-    'lanczos': cv2.INTER_LANCZOS4
+    "nearest": cv2.INTER_NEAREST,
+    "bilinear": cv2.INTER_LINEAR,
+    "bicubic": cv2.INTER_CUBIC,
+    "area": cv2.INTER_AREA,
+    "lanczos": cv2.INTER_LANCZOS4,
 }
 
 
-def imresize(img,
-             size,
-             return_scale=False,
-             interpolation='bilinear',
-             out=None):
+def normalizer(
+    *, x: torch.Tensor, pixel_mean: torch.Tensor, pixel_std: torch.Tensor
+) -> torch.Tensor:
+    return (x - pixel_mean) / pixel_std
+
+
+def imresize(img, size, return_scale=False, interpolation="bilinear", out=None):
     """Resize image to a given size.
     Args:
         img (ndarray): The input image.
@@ -43,7 +46,8 @@ def imresize(img,
     """
     h, w = img.shape[:2]
     resized_img = cv2.resize(
-        img, size, dst=out, interpolation=interp_codes[interpolation])
+        img, size, dst=out, interpolation=interp_codes[interpolation]
+    )
     if not return_scale:
         return resized_img
     else:
@@ -52,7 +56,7 @@ def imresize(img,
         return resized_img, w_scale, h_scale
 
 
-def imresize_like(img, dst_img, return_scale=False, interpolation='bilinear'):
+def imresize_like(img, dst_img, return_scale=False, interpolation="bilinear"):
     """Resize image to the same size of a given image.
     Args:
         img (ndarray): The input image.
@@ -83,16 +87,16 @@ def rescale_size(old_size, scale, return_scale=False):
     w, h = old_size
     if isinstance(scale, (float, int)):
         if scale <= 0:
-            raise ValueError(f'Invalid scale {scale}, must be positive.')
+            raise ValueError(f"Invalid scale {scale}, must be positive.")
         scale_factor = scale
     elif isinstance(scale, tuple):
         max_long_edge = max(scale)
         max_short_edge = min(scale)
-        scale_factor = min(max_long_edge / max(h, w),
-                           max_short_edge / min(h, w))
+        scale_factor = min(max_long_edge / max(h, w), max_short_edge / min(h, w))
     else:
         raise TypeError(
-            f'Scale must be a number or tuple of int, but got {type(scale)}')
+            f"Scale must be a number or tuple of int, but got {type(scale)}"
+        )
 
     new_size = _scale_size((w, h), scale_factor)
 
@@ -102,7 +106,7 @@ def rescale_size(old_size, scale, return_scale=False):
         return new_size
 
 
-def imrescale(img, scale, return_scale=False, interpolation='bilinear'):
+def imrescale(img, scale, return_scale=False, interpolation="bilinear"):
     """Resize image while keeping the aspect ratio.
     Args:
         img (ndarray): The input image.
@@ -124,6 +128,7 @@ def imrescale(img, scale, return_scale=False, interpolation='bilinear'):
     else:
         return rescaled_img
 
+
 def center_of_mass(bitmasks):
     _, h, w = bitmasks.size()
 
@@ -137,16 +142,25 @@ def center_of_mass(bitmasks):
     center_y = m01 / m00
     return center_x, center_y
 
-def point_nms(heat, kernel=2):
+
+def point_nms(heat, kernel: int = 2):
     # kernel must be 2
     hmax = F.max_pool2d(heat, (kernel, kernel), stride=1, padding=1)
     keep = (hmax[:, :, :-1, :-1] == heat).float()
     return heat * keep
 
-def matrix_nms(cate_labels, seg_masks, sum_masks, cate_scores, sigma=2.0, kernel='gaussian'):
+
+def matrix_nms(
+    cate_labels,
+    seg_masks,
+    sum_masks,
+    cate_scores: torch.Tensor,
+    sigma: int = 2,
+    kernel: str = "gaussian",
+) -> torch.Tensor:
     n_samples = len(cate_labels)
     if n_samples == 0:
-        return []
+        return torch.tensor([])
 
     seg_masks = seg_masks.reshape(n_samples, -1).float()
     # inter.
@@ -154,10 +168,14 @@ def matrix_nms(cate_labels, seg_masks, sum_masks, cate_scores, sigma=2.0, kernel
     # union.
     sum_masks_x = sum_masks.expand(n_samples, n_samples)
     # iou.
-    iou_matrix = (inter_matrix / (sum_masks_x + sum_masks_x.transpose(1, 0) - inter_matrix)).triu(diagonal=1)
+    iou_matrix = (
+        inter_matrix / (sum_masks_x + sum_masks_x.transpose(1, 0) - inter_matrix)
+    ).triu(diagonal=1)
     # label_specific matrix.
     cate_labels_x = cate_labels.expand(n_samples, n_samples)
-    label_matrix = (cate_labels_x == cate_labels_x.transpose(1, 0)).float().triu(diagonal=1)
+    label_matrix = (
+        (cate_labels_x == cate_labels_x.transpose(1, 0)).float().triu(diagonal=1)
+    )
 
     # IoU compensation
     compensate_iou, _ = (iou_matrix * label_matrix).max(0)
@@ -167,12 +185,12 @@ def matrix_nms(cate_labels, seg_masks, sum_masks, cate_scores, sigma=2.0, kernel
     delay_iou = iou_matrix * label_matrix
 
     # matrix nms
-    if kernel == 'linear':
+    if kernel == "linear":
         delay_matrix = (1 - delay_iou) / (1 - compensate_iou)
         delay_coefficient, _ = delay_matrix.min(0)
     else:
-        delay_matrix = torch.exp(-1 * sigma * (delay_iou ** 2))
-        compensate_matrix = torch.exp(-1 * sigma * (compensate_iou ** 2))
+        delay_matrix = torch.exp(-1 * sigma * (delay_iou**2))
+        compensate_matrix = torch.exp(-1 * sigma * (compensate_iou**2))
         delay_coefficient, _ = (delay_matrix / compensate_matrix).min(0)
 
     # update the score.
@@ -181,10 +199,12 @@ def matrix_nms(cate_labels, seg_masks, sum_masks, cate_scores, sigma=2.0, kernel
     return cate_scores_update
 
 
-def mask_nms(cate_labels, seg_masks, sum_masks, cate_scores, nms_thr=0.5):
+def mask_nms(
+    cate_labels, seg_masks, sum_masks, cate_scores, nms_thr: float = 0.5
+) -> torch.Tensor:
     n_samples = len(cate_scores)
     if n_samples == 0:
-        return []
+        return torch.tensor([])
 
     keep = seg_masks.new_ones(cate_scores.shape)
     seg_masks = seg_masks.float()
